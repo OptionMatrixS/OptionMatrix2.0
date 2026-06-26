@@ -1,0 +1,325 @@
+"""
+quiz_data.py — NISM-style derivatives quiz question bank.
+Each question: {question, options: [a,b,c,d], answer: int (0-indexed), explanation: str}
+"""
+
+QUIZ_QUESTIONS = [
+    {
+        "question": "What is the lot size of NIFTY options?",
+        "options": ["25", "50", "75", "100"],
+        "answer": 2,
+        "explanation": "NIFTY options have a lot size of 75 units per contract.",
+    },
+    {
+        "question": "Which Greek measures the rate of change of delta with respect to the underlying price?",
+        "options": ["Theta", "Vega", "Gamma", "Rho"],
+        "answer": 2,
+        "explanation": "Gamma measures how much delta changes for a ₹1 move in the underlying.",
+    },
+    {
+        "question": "A Bull Call Spread involves:",
+        "options": [
+            "Buying a higher strike call and selling a lower strike call",
+            "Buying a lower strike call and selling a higher strike call",
+            "Buying a call and selling a put at the same strike",
+            "Selling two calls at different strikes",
+        ],
+        "answer": 1,
+        "explanation": "A Bull Call Spread involves buying a lower strike call (ITM/ATM) and selling a higher strike call (OTM).",
+    },
+    {
+        "question": "What happens to option premium when implied volatility increases?",
+        "options": [
+            "Call premium increases, put premium decreases",
+            "Both call and put premiums decrease",
+            "Both call and put premiums increase",
+            "No effect on premium",
+        ],
+        "answer": 2,
+        "explanation": "Higher IV increases both call and put premiums as it implies higher expected movement.",
+    },
+    {
+        "question": "What is the maximum loss for a buyer of a call option?",
+        "options": [
+            "Unlimited",
+            "Strike price minus premium paid",
+            "Premium paid",
+            "Difference between spot and strike price",
+        ],
+        "answer": 2,
+        "explanation": "The maximum loss for an option buyer is limited to the premium paid.",
+    },
+    {
+        "question": "An Iron Condor consists of how many legs?",
+        "options": ["2", "3", "4", "5"],
+        "answer": 2,
+        "explanation": "An Iron Condor has 4 legs: long put, short put, short call, and long call.",
+    },
+    {
+        "question": "Theta is also known as:",
+        "options": [
+            "Speed decay",
+            "Time decay",
+            "Volatility decay",
+            "Price decay",
+        ],
+        "answer": 1,
+        "explanation": "Theta represents the time decay of an option — the rate at which its value erodes as expiry approaches.",
+    },
+    {
+        "question": "Which of the following is NOT a type of margin in F&O trading?",
+        "options": [
+            "SPAN margin",
+            "Exposure margin",
+            "Premium margin",
+            "Guarantee margin",
+        ],
+        "answer": 3,
+        "explanation": "SPAN, exposure, and premium margins are standard in F&O. 'Guarantee margin' is not a standard margin type.",
+    },
+    {
+        "question": "What is the settlement type for NIFTY index options in India?",
+        "options": [
+            "Physical delivery",
+            "Cash settled",
+            "Both physical and cash",
+            "T+2 delivery",
+        ],
+        "answer": 1,
+        "explanation": "Index options in India are cash settled. Only stock options may have physical delivery.",
+    },
+    {
+        "question": "If a trader has a negative delta position, they benefit when:",
+        "options": [
+            "The underlying price increases",
+            "The underlying price decreases",
+            "Volatility increases",
+            "Time passes",
+        ],
+        "answer": 1,
+        "explanation": "Negative delta means the position profits when the underlying price falls.",
+    },
+    {
+        "question": "What is a Short Straddle?",
+        "options": [
+            "Buy CE and PE at the same strike",
+            "Sell CE and PE at the same strike",
+            "Buy CE at one strike and PE at a different strike",
+            "Sell CE at one strike and PE at a different strike",
+        ],
+        "answer": 1,
+        "explanation": "A Short Straddle involves selling both a call and a put at the same strike price and expiry.",
+    },
+    {
+        "question": "The Black-Scholes model assumes:",
+        "options": [
+            "Constant volatility and risk-free rate",
+            "Variable volatility and constant interest rate",
+            "No dividends and variable volatility",
+            "Constant dividends and variable interest rate",
+        ],
+        "answer": 0,
+        "explanation": "The B-S model assumes constant volatility, constant risk-free rate, log-normal distribution, and no dividends.",
+    },
+    {
+        "question": "In India, who is the clearing corporation for NSE derivatives?",
+        "options": [
+            "CDSL",
+            "NSDL",
+            "NSE Clearing Limited (NCL)",
+            "SEBI",
+        ],
+        "answer": 2,
+        "explanation": "NSE Clearing Limited (formerly NSCCL) is the clearing corporation for NSE derivatives.",
+    },
+    {
+        "question": "What is the expiry day for weekly NIFTY options?",
+        "options": [
+            "Last Wednesday of the month",
+            "Every Thursday",
+            "Every Friday",
+            "Last Thursday of the month",
+        ],
+        "answer": 1,
+        "explanation": "Weekly NIFTY options expire every Thursday (or preceding trading day if Thursday is a holiday).",
+    },
+    {
+        "question": "A Long Butterfly Spread involves:",
+        "options": [
+            "Buy 1 ITM, Sell 2 ATM, Buy 1 OTM",
+            "Sell 1 ITM, Buy 2 ATM, Sell 1 OTM",
+            "Buy 2 ATM, Sell 1 ITM, Sell 1 OTM",
+            "Sell 2 ATM, Buy 1 ITM",
+        ],
+        "answer": 0,
+        "explanation": "A Long Butterfly involves buying 1 ITM call, selling 2 ATM calls, and buying 1 OTM call.",
+    },
+    {
+        "question": "Put-Call Parity for European options states:",
+        "options": [
+            "C + PV(K) = P + S",
+            "C + P = S + PV(K)",
+            "C - P = S - PV(K)",
+            "C × P = S × K",
+        ],
+        "answer": 2,
+        "explanation": "Put-Call Parity: C - P = S - PV(K), where PV(K) is the present value of the strike price.",
+    },
+    {
+        "question": "What is the maximum profit from a Short Straddle?",
+        "options": [
+            "Unlimited",
+            "Net premium received",
+            "Strike price minus premium",
+            "Zero",
+        ],
+        "answer": 1,
+        "explanation": "The maximum profit of a Short Straddle is the total net premium received, achieved when spot = strike at expiry.",
+    },
+    {
+        "question": "Vega is highest for options that are:",
+        "options": [
+            "Deep in-the-money",
+            "Deep out-of-the-money",
+            "At-the-money",
+            "Far from expiry and deep ITM",
+        ],
+        "answer": 2,
+        "explanation": "Vega is highest for ATM options and options with more time to expiry.",
+    },
+    {
+        "question": "What is the tick size for NIFTY options?",
+        "options": ["₹0.01", "₹0.05", "₹0.10", "₹0.50"],
+        "answer": 1,
+        "explanation": "The minimum price movement (tick size) for NIFTY options is ₹0.05.",
+    },
+    {
+        "question": "An option with intrinsic value of ₹50 and premium of ₹80 has time value of:",
+        "options": ["₹130", "₹30", "₹50", "₹80"],
+        "answer": 1,
+        "explanation": "Time value = Premium - Intrinsic value = ₹80 - ₹50 = ₹30.",
+    },
+    {
+        "question": "SEBI's margin framework for option sellers includes:",
+        "options": [
+            "Only SPAN margin",
+            "Only exposure margin",
+            "SPAN + Exposure margin",
+            "No margin required",
+        ],
+        "answer": 2,
+        "explanation": "Option sellers must maintain both SPAN margin and exposure margin as per SEBI guidelines.",
+    },
+    {
+        "question": "Delta of an at-the-money call option is approximately:",
+        "options": ["0", "0.25", "0.50", "1.0"],
+        "answer": 2,
+        "explanation": "ATM call options have a delta of approximately 0.50, meaning a ₹1 move in the underlying causes ~₹0.50 change in premium.",
+    },
+    {
+        "question": "What is a calendar spread?",
+        "options": [
+            "Same strike, different expiry",
+            "Same expiry, different strikes",
+            "Different index, same strike",
+            "Same everything, different quantity",
+        ],
+        "answer": 0,
+        "explanation": "A calendar (time) spread involves the same strike price but different expiry dates.",
+    },
+    {
+        "question": "The SENSEX option lot size is:",
+        "options": ["10", "15", "20", "25"],
+        "answer": 2,
+        "explanation": "SENSEX options have a lot size of 20 units per contract.",
+    },
+    {
+        "question": "Which of the following strategies has unlimited risk?",
+        "options": [
+            "Long Call",
+            "Naked Short Call",
+            "Bull Call Spread",
+            "Iron Condor",
+        ],
+        "answer": 1,
+        "explanation": "A naked short call has theoretically unlimited risk as the underlying can rise without limit.",
+    },
+    {
+        "question": "What is open interest (OI)?",
+        "options": [
+            "Total number of shares traded",
+            "Total number of outstanding contracts not yet settled",
+            "The opening price of an option",
+            "Interest rate used in option pricing",
+        ],
+        "answer": 1,
+        "explanation": "Open interest is the total number of outstanding derivative contracts that have not been settled.",
+    },
+    {
+        "question": "In a Bear Put Spread, maximum profit occurs when:",
+        "options": [
+            "Spot is above the higher strike",
+            "Spot is between the two strikes",
+            "Spot is below the lower strike",
+            "Spot equals the higher strike",
+        ],
+        "answer": 2,
+        "explanation": "Maximum profit in a Bear Put Spread occurs when the underlying falls below the lower strike price.",
+    },
+    {
+        "question": "Which regulatory body oversees derivatives trading in India?",
+        "options": ["RBI", "SEBI", "IRDAI", "AMFI"],
+        "answer": 1,
+        "explanation": "The Securities and Exchange Board of India (SEBI) regulates derivatives trading in India.",
+    },
+    {
+        "question": "What is the formula for synthetic futures?",
+        "options": [
+            "Long Call + Short Put at same strike",
+            "Long Call + Long Put at same strike",
+            "Short Call + Short Put at same strike",
+            "Long Call - Short Call",
+        ],
+        "answer": 0,
+        "explanation": "A synthetic long future = Long Call + Short Put at the same strike and expiry.",
+    },
+    {
+        "question": "Theta is always negative for:",
+        "options": [
+            "Option sellers only",
+            "Option buyers only",
+            "Both buyers and sellers",
+            "Neither buyers nor sellers",
+        ],
+        "answer": 1,
+        "explanation": "For option buyers (long positions), theta is always negative — time decay works against them.",
+    },
+    {
+        "question": "The BANKNIFTY lot size is:",
+        "options": ["15", "25", "30", "40"],
+        "answer": 2,
+        "explanation": "BANKNIFTY options have a lot size of 30 units per contract (revised from 25).",
+    },
+    {
+        "question": "An option is said to be 'in-the-money' when:",
+        "options": [
+            "The option has no intrinsic value",
+            "The option has intrinsic value",
+            "The option premium equals zero",
+            "The option has only time value",
+        ],
+        "answer": 1,
+        "explanation": "An ITM option has positive intrinsic value: CE when spot > strike, PE when spot < strike.",
+    },
+    {
+        "question": "What does VIX measure?",
+        "options": [
+            "Volume of index trades",
+            "Market's expectation of near-term volatility",
+            "Value of index futures",
+            "Velocity of price changes",
+        ],
+        "answer": 1,
+        "explanation": "India VIX measures the market's expectation of 30-day volatility, derived from NIFTY option prices.",
+    },
+]
