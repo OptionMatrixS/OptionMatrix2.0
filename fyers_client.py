@@ -130,14 +130,16 @@ def _generate_token_inner():
     bearer = r3d["data"]["access_token"]
 
     # Step 4 — Get auth code
-    app_id = client_id.split("-")[0]
+    app_id_parts = client_id.split("-")
+    app_id = app_id_parts[0]
+    app_type = app_id_parts[1] if len(app_id_parts) > 1 else "100"
     r4 = requests.post(
         "https://api-t1.fyers.in/api/v3/token",
         json={
             "fyers_id": username,
             "app_id": app_id,
             "redirect_uri": "https://optionmatrix2.streamlit.app/",
-            "appType": "100",
+            "appType": app_type,
             "code_challenge": "",
             "state": "sample",
             "scope": "",
@@ -147,12 +149,16 @@ def _generate_token_inner():
         },
         headers={"Authorization": f"Bearer {bearer}"},
     )
-    r4.raise_for_status()
-    r4d = r4.json()
+    r4d = r4.json() if r4.content else {}
+    if r4.status_code != 200:
+        raise RuntimeError(
+            f"Step 4 failed (HTTP {r4.status_code}): {r4d}. "
+            f"Check: client_id={client_id}, app_id={app_id}, appType={app_type}"
+        )
     url_field = r4d.get("Url") or r4d.get("url") or ""
     if "auth_code=" not in url_field:
         raise RuntimeError(
-            f"Step 4 failed (check Redirect URL in Fyers dashboard): {r4d}"
+            f"Step 4 failed (no auth_code in response): {r4d}"
         )
     auth_code = url_field.split("auth_code=")[1].split("&")[0]
 
@@ -630,3 +636,4 @@ def dark_chart_layout(title="", height=500, yaxis_title="", xaxis_title=""):
         ),
         hovermode="x unified",
     )
+
