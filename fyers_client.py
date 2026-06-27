@@ -131,11 +131,13 @@ def _generate_token_inner():
         raise RuntimeError(f"Step 3 failed: {r3d}")
     bearer = r3d["data"]["access_token"]
 
-    # Step 4a — POST /api/v3/token to get session token (data.auth)
+    # Step 4 — Get access token via POST /api/v3/token
+    # The TOTP flow returns the access token directly in data.auth
+    # (generate-authcode redirect is browser-only and doesn't work server-side)
     app_id_parts = client_id.split("-")
     app_id = app_id_parts[0]
     app_type = app_id_parts[1] if len(app_id_parts) > 1 else "100"
-    r4a = requests.post(
+    r4 = requests.post(
         "https://api-t1.fyers.in/api/v3/token",
         json={
             "fyers_id": username,
@@ -151,113 +153,21 @@ def _generate_token_inner():
         },
         headers={"Authorization": f"Bearer {bearer}"},
     )
-    r4ad = r4a.json() if r4a.content else {}
-    session_token = ""
-    if isinstance(r4ad.get("data"), dict):
-        session_token = r4ad["data"].get("auth", "")
-    if not session_token:
-        raise RuntimeError(f"Step 4a: no session token. Response: {r4ad}")
+    r4d = r4.json() if r4.content else {}
+    if r4d.get("s") != "ok":
+        raise RuntimeError(f"Step 4 failed: {r4d}")
 
-    # Step 4b — GET generate-authcode with session token as cookie
-    # This triggers a redirect to redirect_uri?auth_code=XXX
-    import urllib.parse
-    auth_url = (
-        f"https://api-t1.fyers.in/api/v3/generate-authcode?"
-        f"client_id={client_id}"
-        f"&redirect_uri={urllib.parse.quote(redirect_uri, safe='')}"
-        f"&response_type=code"
-        f"&state=sample"
-    )
+    access_token = ""
+    data = r4d.get("data", {})
+    if isinstance(data, dict) and data.get("auth"):
+        access_token = data["auth"]
 
-    s = requests.Session()
-    s.cookies.set("FYERS_TOKEN", session_token, domain="api-t1.fyers.in", path="/")
-    r4b = s.get(auth_url, allow_redirects=False)
+    if not access_token:
+        raise RuntimeError(f"Step 4: no access token in response: {r4d}")
 
-    auth_code = ""
-
-    # Check Location header for redirect (302)
-    if r4b.status_code in (301, 302, 303, 307, 308):
-        location = r4b.headers.get("Location", "")
-        if "auth_code=" in location:
-            auth_code = location.split("auth_code=")[1].split("&")[0]
-        elif "code=" in location:
-            auth_code = location.split("code=")[1].split("&")[0]
-
-    # If no redirect, try following redirects and check final URL
-    if not auth_code:
-        r4c = s.get(auth_url, allow_redirects=True)
-        final_url = str(r4c.url)
-        if "auth_code=" in final_url:
-            auth_code = final_url.split("auth_code=")[1].split("&")[0]
-
-    # Also try with Authorization header instead of cookie
-    if not auth_code:
-        r4d = requests.get(
-            auth_url,
-            headers={"Authorization": f"Bearer {session_token}"},
-            allow_redirects=False,
-        )
-        if r4d.status_code in (301, 302, 303, 307, 308):
-            location = r4d.headers.get("Location", "")
-            if "auth_code=" in location:
-                auth_code = location.split("auth_code=")[1].split("&")[0]
-
-    # Try response body
-    if not auth_code:
-        r4e = requests.get(
-            auth_url,
-            headers={"Authorization": f"Bearer {session_token}"},
-            allow_redirects=True,
-        )
-        final_url = str(r4e.url)
-        if "auth_code=" in final_url:
-            auth_code = final_url.split("auth_code=")[1].split("&")[0]
-        # Check body
-        if not auth_code and r4e.text:
-            import re as _re
-            m = _re.search(r'auth_code=([^&"\'<>\s]+)', r4e.text)
-            if m:
-                auth_code = m.group(1)
-
-    if not auth_code:
-        raise RuntimeError(
-            f"Could not extract auth_code from redirect. "
-            f"Cookie redirect status={r4b.status_code}, "
-            f"Location={r4b.headers.get('Location', 'none')}, "
-            f"Bearer redirect final_url={final_url}"
-        )
-
-    # Step 5 — Validate auth_code → access_token
-    session = fyersModel.SessionModel(
-        client_id=client_id,
-        secret_key=secret_key,
-        redirect_uri=redirect_uri,
-        response_type="code",
-        grant_type="authorization_code",
-    )
-    session.set_token(auth_code)
-    response = session.generate_token()
-
-    if isinstance(response, dict) and "access_token" in response:
-        return response["access_token"]
-
-    # Fallback: manual validate
-    app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
-    r5 = requests.post(
-        "https://api-t1.fyers.in/api/v3/validate-authcode",
-        json={
-            "grant_type": "authorization_code",
-            "appIdHash": app_hash,
-            "code": auth_code,
-        },
-    )
-    r5d = r5.json() if r5.content else {}
-    if r5.status_code == 200 and "access_token" in r5d:
-        return r5d["access_token"]
-
-    raise RuntimeError(
-        f"Step 5 failed: generate_token={response}, validate={r5d}"
-    )
+    # Return just the JWT — FyersModel internally prepends "client_id:" 
+    # so we must NOT prefix it ourselves
+    return access_token
 
 
 @st.cache_resource(ttl=43200)  # 12 hours — generates once, shared across ALL sessions
@@ -303,7 +213,11 @@ def get_fyers_client():
     today_str = date.today().isoformat()
     token = _get_cached_token(today_str)
 
-    client_id = st.secrets["FYERS_CLIENT_ID"]
+    client_id = str(st.secrets["FYERS_CLIENT_ID"])
+    # Fyers API expects token in format "client_id:access_token"
+    # Only prepend if not already prefixed
+    if not token.startswith(client_id):
+        token = f"{client_id}:{token}"
     fyers = fyersModel.FyersModel(
         client_id=client_id, is_async=False, token=token, log_path=""
     )
