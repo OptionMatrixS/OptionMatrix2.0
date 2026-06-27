@@ -16,7 +16,6 @@ import pyotp
 import pandas as pd
 import numpy as np
 from datetime import datetime, date, timedelta
-from urllib.parse import parse_qs, urlparse
 
 try:
     from fyers_apiv3 import fyersModel
@@ -80,18 +79,15 @@ def market_status_html():
 def _generate_token_inner():
     """
     TOTP login flow for Fyers API v3.
-    Steps 1-3: TOTP authentication → bearer token.
-    Step 4: POST /api/v3/token with bearer → auth_code (in the SAME response,
-            either as 'Url' query param or 'data.auth' field — NO separate
-            GET request to generate-authcode is needed; that endpoint is
-            only for the interactive browser login flow, not this bearer flow).
-    Step 5: Validate auth_code via SDK SessionModel → access_token.
+    Steps 1-3: TOTP authentication.
+    Step 4: Use bearer to authorize app and get auth_code via redirect.
+    Step 5: Validate auth_code to get final access_token.
     """
-    client_id  = str(st.secrets["FYERS_CLIENT_ID"])
+    client_id = str(st.secrets["FYERS_CLIENT_ID"])
     secret_key = str(st.secrets["FYERS_SECRET_KEY"])
-    username   = str(st.secrets["FYERS_USERNAME"])
-    pin        = str(st.secrets["FYERS_PIN"])
-    totp_key   = str(st.secrets["FYERS_TOTP_KEY"])
+    username = str(st.secrets["FYERS_USERNAME"])
+    pin = str(st.secrets["FYERS_PIN"])
+    totp_key = str(st.secrets["FYERS_TOTP_KEY"])
     redirect_uri = "http://127.0.0.1:8080/"
 
     # Step 1 — Send login OTP
@@ -135,49 +131,84 @@ def _generate_token_inner():
         raise RuntimeError(f"Step 3 failed: {r3d}")
     bearer = r3d["data"]["access_token"]
 
-    # Step 4 — POST /api/v3/token with bearer
-    # auth_code is returned DIRECTLY in this response — no GET request needed.
+    # Step 4 — Get auth_code via shared session (POST sets cookies, GET uses them)
+    import urllib.parse
     app_id_parts = client_id.split("-")
-    app_id   = app_id_parts[0]
+    app_id = app_id_parts[0]
     app_type = app_id_parts[1] if len(app_id_parts) > 1 else "100"
 
-    r4 = requests.post(
+    # Use a single session so POST response cookies carry to GET
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {bearer}"})
+
+    # Step 4a — POST /api/v3/token (sets session cookies)
+    r4a = s.post(
         "https://api-t1.fyers.in/api/v3/token",
         json={
-            "fyers_id":       username,
-            "app_id":         app_id,
-            "redirect_uri":   redirect_uri,
-            "appType":        app_type,
+            "fyers_id": username,
+            "app_id": app_id,
+            "redirect_uri": redirect_uri,
+            "appType": app_type,
             "code_challenge": "",
-            "state":          "sample",
-            "scope":          "",
-            "nonce":          "",
-            "response_type":  "code",
-            "create_cookie":  True,
+            "state": "sample",
+            "scope": "",
+            "nonce": "",
+            "response_type": "code",
+            "create_cookie": True,
         },
-        headers={"Authorization": f"Bearer {bearer}"},
     )
-    r4d = r4.json() if r4.content else {}
-    if r4d.get("s") != "ok":
+    r4ad = r4a.json() if r4a.content else {}
+    if r4ad.get("s") != "ok":
+        raise RuntimeError(f"Step 4a failed: {r4ad}")
+
+    # Step 4b — GET generate-authcode (cookies from 4a enable redirect)
+    auth_url = (
+        f"https://api-t1.fyers.in/api/v3/generate-authcode?"
+        f"client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri, safe='')}"
+        f"&response_type=code"
+        f"&state=sample"
+    )
+
+    # Try with allow_redirects=False first to catch 302
+    r4b = s.get(auth_url, allow_redirects=False)
+
+    auth_code = ""
+    # Check 302 redirect Location header
+    if r4b.status_code in (301, 302, 303, 307, 308):
+        location = r4b.headers.get("Location", "")
+        if "auth_code=" in location:
+            auth_code = location.split("auth_code=")[1].split("&")[0]
+
+    # Try following redirects — auth_code in final URL
+    if not auth_code:
+        r4c = s.get(auth_url, allow_redirects=True)
+        final_url = str(r4c.url)
+        if "auth_code=" in final_url:
+            auth_code = final_url.split("auth_code=")[1].split("&")[0]
+
+    # Fallback — also set data.auth as explicit cookie
+    if not auth_code:
+        data_auth = r4ad.get("data", {}).get("auth", "")
+        if data_auth:
+            s.cookies.set("FYERS_TOKEN", data_auth, domain="api-t1.fyers.in")
+            r4d = s.get(auth_url, allow_redirects=False)
+            if r4d.status_code in (301, 302, 303, 307, 308):
+                location = r4d.headers.get("Location", "")
+                if "auth_code=" in location:
+                    auth_code = location.split("auth_code=")[1].split("&")[0]
+
+    if not auth_code:
+        # Debug info for troubleshooting
+        cookies_str = str(dict(s.cookies))
         raise RuntimeError(
-            f"Step 4 failed: {r4d}\n"
-            f"redirectUrl mismatch → set Redirect URL in myapi.fyers.in to: {redirect_uri}"
+            f"Could not get auth_code. "
+            f"4b status={r4b.status_code}, "
+            f"4b headers={dict(r4b.headers)}, "
+            f"session_cookies={cookies_str}"
         )
 
-    # Extract auth_code from the Step 4 response itself (no extra GET call)
-    data = r4d.get("data", {})
-    auth_code = (
-        data.get("auth_code")
-        or data.get("auth")
-        or parse_qs(urlparse(r4d.get("Url",  "")).query).get("auth_code", [None])[0]
-        or parse_qs(urlparse(r4d.get("url",  "")).query).get("auth_code", [None])[0]
-        or parse_qs(urlparse(data.get("Url", "")).query).get("auth_code", [None])[0]
-        or parse_qs(urlparse(data.get("url", "")).query).get("auth_code", [None])[0]
-    )
-    if not auth_code:
-        raise RuntimeError(f"Step 4: no auth_code found in response: {r4d}")
-
-    # Step 5 — Validate auth_code → access_token via SDK
+    # Step 5 — Validate auth_code → access_token
     session = fyersModel.SessionModel(
         client_id=client_id,
         secret_key=secret_key,
@@ -190,22 +221,7 @@ def _generate_token_inner():
     if isinstance(response, dict) and "access_token" in response:
         return response["access_token"]
 
-    # Fallback — validate-authcode via direct REST call with SHA-256 hash
-    app_hash = hashlib.sha256(f"{app_id}:{secret_key}".encode()).hexdigest()
-    r5 = requests.post(
-        "https://api-t1.fyers.in/api/v3/validate-authcode",
-        json={
-            "grant_type": "authorization_code",
-            "appIdHash":  app_hash,
-            "code":       auth_code,
-        },
-    )
-    r5d = r5.json() if r5.content else {}
-    token = r5d.get("access_token")
-    if token:
-        return token
-
-    raise RuntimeError(f"Step 5 failed:\n  SDK: {response}\n  REST: {r5d}")
+    raise RuntimeError(f"Step 5 failed: {response}")
 
 
 @st.cache_resource(ttl=43200)  # 12 hours — generates once, shared across ALL sessions
@@ -215,6 +231,7 @@ def _get_cached_token(_date_key):
     a new token is generated each day. Raises on failure so
     st.cache_resource never caches an error.
     """
+    # Retry with backoff for 429 rate limiting
     max_retries = 3
     for attempt in range(max_retries):
         try:
@@ -278,9 +295,11 @@ def _label_to_code(label, index="NIFTY"):
     _SS = st.session_state
     cache_key = f"lc_{index}_{label}"
 
+    # Check cache first
     if cache_key in _SS and _SS[cache_key]:
         return _SS[cache_key]
 
+    # Direct parse
     code = _parse_label(label)
     if code:
         _SS[cache_key] = code
@@ -314,8 +333,10 @@ def build_symbol(index, code, opt_type, strike):
     strike_str = str(int(float(str(strike).replace(",", ""))))
 
     if any(c.isalpha() for c in str(code)):
+        # Monthly format
         return f"{exchange}:{index}{code}{opt_type}{strike_str}"
     else:
+        # Weekly format: code = YYMMDD → YY + M(no leading zero) + DD
         code = str(code)
         yy = code[:2]
         mm = str(int(code[2:4]))  # strip leading zero
