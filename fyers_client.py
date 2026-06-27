@@ -155,12 +155,18 @@ def _generate_token_inner():
             f"Step 4 failed (HTTP {r4.status_code}): {r4d}. "
             f"Check: client_id={client_id}, app_id={app_id}, appType={app_type}"
         )
-    url_field = r4d.get("Url") or r4d.get("url") or ""
-    if "auth_code=" not in url_field:
-        raise RuntimeError(
-            f"Step 4 failed (no auth_code in response): {r4d}"
-        )
-    auth_code = url_field.split("auth_code=")[1].split("&")[0]
+    # Extract auth code — Fyers v3 returns it in data.auth (not a redirect URL)
+    auth_code = ""
+    data = r4d.get("data", {})
+    if isinstance(data, dict) and data.get("auth"):
+        auth_code = data["auth"]
+    else:
+        # Fallback: try URL-based extraction
+        url_field = r4d.get("Url") or r4d.get("url") or ""
+        if "auth_code=" in url_field:
+            auth_code = url_field.split("auth_code=")[1].split("&")[0]
+    if not auth_code:
+        raise RuntimeError(f"Step 4: no auth_code found in response: {r4d}")
 
     # Step 5 — Validate auth code → access token
     app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
