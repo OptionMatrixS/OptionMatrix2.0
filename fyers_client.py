@@ -131,13 +131,18 @@ def _generate_token_inner():
         raise RuntimeError(f"Step 3 failed: {r3d}")
     bearer = r3d["data"]["access_token"]
 
-    # Step 4 — Get access token via POST /api/v3/token
-    # The TOTP flow returns the access token directly in data.auth
-    # (generate-authcode redirect is browser-only and doesn't work server-side)
+    # Step 4 — Get auth_code via shared session (POST sets cookies, GET uses them)
+    import urllib.parse
     app_id_parts = client_id.split("-")
     app_id = app_id_parts[0]
     app_type = app_id_parts[1] if len(app_id_parts) > 1 else "100"
-    r4 = requests.post(
+
+    # Use a single session so POST response cookies carry to GET
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {bearer}"})
+
+    # Step 4a — POST /api/v3/token (sets session cookies)
+    r4a = s.post(
         "https://api-t1.fyers.in/api/v3/token",
         json={
             "fyers_id": username,
@@ -151,23 +156,72 @@ def _generate_token_inner():
             "response_type": "code",
             "create_cookie": True,
         },
-        headers={"Authorization": f"Bearer {bearer}"},
     )
-    r4d = r4.json() if r4.content else {}
-    if r4d.get("s") != "ok":
-        raise RuntimeError(f"Step 4 failed: {r4d}")
+    r4ad = r4a.json() if r4a.content else {}
+    if r4ad.get("s") != "ok":
+        raise RuntimeError(f"Step 4a failed: {r4ad}")
 
-    access_token = ""
-    data = r4d.get("data", {})
-    if isinstance(data, dict) and data.get("auth"):
-        access_token = data["auth"]
+    # Step 4b — GET generate-authcode (cookies from 4a enable redirect)
+    auth_url = (
+        f"https://api-t1.fyers.in/api/v3/generate-authcode?"
+        f"client_id={client_id}"
+        f"&redirect_uri={urllib.parse.quote(redirect_uri, safe='')}"
+        f"&response_type=code"
+        f"&state=sample"
+    )
 
-    if not access_token:
-        raise RuntimeError(f"Step 4: no access token in response: {r4d}")
+    # Try with allow_redirects=False first to catch 302
+    r4b = s.get(auth_url, allow_redirects=False)
 
-    # Return just the JWT — FyersModel internally prepends "client_id:" 
-    # so we must NOT prefix it ourselves
-    return access_token
+    auth_code = ""
+    # Check 302 redirect Location header
+    if r4b.status_code in (301, 302, 303, 307, 308):
+        location = r4b.headers.get("Location", "")
+        if "auth_code=" in location:
+            auth_code = location.split("auth_code=")[1].split("&")[0]
+
+    # Try following redirects — auth_code in final URL
+    if not auth_code:
+        r4c = s.get(auth_url, allow_redirects=True)
+        final_url = str(r4c.url)
+        if "auth_code=" in final_url:
+            auth_code = final_url.split("auth_code=")[1].split("&")[0]
+
+    # Fallback — also set data.auth as explicit cookie
+    if not auth_code:
+        data_auth = r4ad.get("data", {}).get("auth", "")
+        if data_auth:
+            s.cookies.set("FYERS_TOKEN", data_auth, domain="api-t1.fyers.in")
+            r4d = s.get(auth_url, allow_redirects=False)
+            if r4d.status_code in (301, 302, 303, 307, 308):
+                location = r4d.headers.get("Location", "")
+                if "auth_code=" in location:
+                    auth_code = location.split("auth_code=")[1].split("&")[0]
+
+    if not auth_code:
+        # Debug info for troubleshooting
+        cookies_str = str(dict(s.cookies))
+        raise RuntimeError(
+            f"Could not get auth_code. "
+            f"4b status={r4b.status_code}, "
+            f"4b headers={dict(r4b.headers)}, "
+            f"session_cookies={cookies_str}"
+        )
+
+    # Step 5 — Validate auth_code → access_token
+    session = fyersModel.SessionModel(
+        client_id=client_id,
+        secret_key=secret_key,
+        redirect_uri=redirect_uri,
+        response_type="code",
+        grant_type="authorization_code",
+    )
+    session.set_token(auth_code)
+    response = session.generate_token()
+    if isinstance(response, dict) and "access_token" in response:
+        return response["access_token"]
+
+    raise RuntimeError(f"Step 5 failed: {response}")
 
 
 @st.cache_resource(ttl=43200)  # 12 hours — generates once, shared across ALL sessions
@@ -214,10 +268,6 @@ def get_fyers_client():
     token = _get_cached_token(today_str)
 
     client_id = str(st.secrets["FYERS_CLIENT_ID"])
-    # Fyers API expects token in format "client_id:access_token"
-    # Only prepend if not already prefixed
-    if not token.startswith(client_id):
-        token = f"{client_id}:{token}"
     fyers = fyersModel.FyersModel(
         client_id=client_id, is_async=False, token=token, log_path=""
     )
