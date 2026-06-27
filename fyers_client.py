@@ -238,9 +238,8 @@ def _generate_token_inner():
     # ── Pre-set cookies from Step 4a data.auth BEFORE any GET ──
     data_auth = r4a_data.get("auth", "")
     if data_auth:
-        # Try multiple cookie names and domains — Fyers varies across versions
-        for cookie_domain in ["api-t1.fyers.in", ".fyers.in"]:
-            s.cookies.set("FYERS_TOKEN", data_auth, domain=cookie_domain, path="/")
+        # Set auth cookie before GET — use broad domain for matching
+        s.cookies.set("FYERS_TOKEN", data_auth, domain=".fyers.in", path="/")
 
     # Also check if redirectUrl already has auth_code
     redirect_url_from_4a = r4a_data.get("redirectUrl", "")
