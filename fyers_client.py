@@ -174,6 +174,11 @@ def _generate_token_inner():
     if r4ad.get("s") != "ok":
         raise RuntimeError(f"Step 4a failed: {r4ad}")
 
+    # Capture Step 4a response cookies and headers for debugging
+    r4a_set_cookies = [v for k, v in r4a.headers.items() if k.lower() == 'set-cookie']
+    r4a_resp_cookies = dict(r4a.cookies)
+    session_cookies_after_4a = dict(s.cookies)
+
     # Check if Step 4a already returned auth_code directly (some API versions)
     r4a_data = r4ad.get("data", {}) if isinstance(r4ad.get("data"), dict) else {}
     # Some versions return a URL with auth_code embedded
@@ -181,12 +186,9 @@ def _generate_token_inner():
     if r4a_url and "auth_code=" in r4a_url:
         auth_code = r4a_url.split("auth_code=")[1].split("&")[0]
         if auth_code:
-            # Skip Step 4b entirely — go straight to Step 5
             session_obj = fyersModel.SessionModel(
-                client_id=client_id,
-                secret_key=secret_key,
-                redirect_uri=redirect_uri,
-                response_type="code",
+                client_id=client_id, secret_key=secret_key,
+                redirect_uri=redirect_uri, response_type="code",
                 grant_type="authorization_code",
             )
             session_obj.set_token(auth_code)
@@ -320,6 +322,10 @@ def _generate_token_inner():
             auth_code = _extract_auth_code(r4c.text if hasattr(r4c, 'text') else "")
 
     if not auth_code:
+        strategy_errors["4a_set_cookies"] = str(r4a_set_cookies)[:300]
+        strategy_errors["4a_resp_cookies"] = str(r4a_resp_cookies)[:200]
+        strategy_errors["4a_session_cookies"] = str(list(session_cookies_after_4a.keys()))
+        strategy_errors["4a_data_keys"] = list(r4a_data.keys())
         raise RuntimeError(
             f"All strategies failed. "
             f"strategy_results={json.dumps(strategy_errors)}"
