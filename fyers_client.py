@@ -82,11 +82,11 @@ def _generate_token_inner():
     Reads credentials from st.secrets. Returns access_token string.
     Raises on any failure (safe for @st.cache_resource).
     """
-    client_id = st.secrets["FYERS_CLIENT_ID"]
-    secret_key = st.secrets["FYERS_SECRET_KEY"]
-    username = st.secrets["FYERS_USERNAME"]
-    pin = st.secrets["FYERS_PIN"]
-    totp_key = st.secrets["FYERS_TOTP_KEY"]
+    client_id = str(st.secrets["FYERS_CLIENT_ID"])
+    secret_key = str(st.secrets["FYERS_SECRET_KEY"])
+    username = str(st.secrets["FYERS_USERNAME"])
+    pin = str(st.secrets["FYERS_PIN"])
+    totp_key = str(st.secrets["FYERS_TOTP_KEY"])
 
     # Step 1 — Send login OTP
     r1 = requests.post(
