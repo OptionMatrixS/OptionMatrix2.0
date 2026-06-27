@@ -155,40 +155,35 @@ def _generate_token_inner():
             f"Step 4 failed (HTTP {r4.status_code}): {r4d}. "
             f"Check: client_id={client_id}, app_id={app_id}, appType={app_type}"
         )
-    # Extract auth code — Fyers v3 returns it in data.auth (not a redirect URL)
-    auth_code = ""
+    # Extract access token — Fyers v3 TOTP flow returns it directly in data.auth
+    # This is a JWT with sub="access_token", NOT an auth code for validate-authcode
+    auth_token = ""
     data = r4d.get("data", {})
     if isinstance(data, dict) and data.get("auth"):
-        auth_code = data["auth"]
+        auth_token = data["auth"]
     else:
-        # Fallback: try URL-based extraction
+        # Fallback: try URL-based extraction + validate-authcode (older flow)
         url_field = r4d.get("Url") or r4d.get("url") or ""
         if "auth_code=" in url_field:
             auth_code = url_field.split("auth_code=")[1].split("&")[0]
-    if not auth_code:
-        raise RuntimeError(f"Step 4: no auth_code found in response: {r4d}")
+            app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
+            r5 = requests.post(
+                "https://api-t1.fyers.in/api/v3/validate-authcode",
+                json={
+                    "grant_type": "authorization_code",
+                    "appIdHash": app_hash,
+                    "code": auth_code,
+                },
+            )
+            r5d = r5.json() if r5.content else {}
+            if r5.status_code == 200 and "access_token" in r5d:
+                return r5d["access_token"]
 
-    # Step 5 — Validate auth code → access token
-    app_id_full = f"{client_id}:{secret_key}"
-    app_hash = hashlib.sha256(app_id_full.encode()).hexdigest()
-    r5 = requests.post(
-        "https://api-t1.fyers.in/api/v3/validate-authcode",
-        json={
-            "grant_type": "authorization_code",
-            "appIdHash": app_hash,
-            "code": auth_code,
-        },
-    )
-    r5d = r5.json() if r5.content else {}
-    if r5.status_code != 200:
-        raise RuntimeError(
-            f"Step 5 failed (HTTP {r5.status_code}): {r5d}. "
-            f"auth_code_len={len(auth_code)}, appIdHash={app_hash[:16]}..."
-        )
-    if "access_token" not in r5d:
-        raise RuntimeError(f"Step 5: no access_token in response: {r5d}")
+    if not auth_token:
+        raise RuntimeError(f"No access token obtained from Step 4: {r4d}")
 
-    return r5d["access_token"]
+    # Format: client_id:access_token for FyersModel
+    return f"{client_id}:{auth_token}"
 
 
 @st.cache_resource(ttl=43200)  # 12 hours — generates once, shared across ALL sessions
