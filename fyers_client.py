@@ -76,10 +76,11 @@ def market_status_html():
 
 # ── Token Generation (5-step TOTP login) ─────────────────────────────────────
 
-def _generate_token():
+def _generate_token_inner():
     """
     5-step TOTP login flow for Fyers API v3.
     Reads credentials from st.secrets. Returns access_token string.
+    Raises on any failure (safe for @st.cache_resource).
     """
     client_id = st.secrets["FYERS_CLIENT_ID"]
     secret_key = st.secrets["FYERS_SECRET_KEY"]
@@ -135,7 +136,7 @@ def _generate_token():
         json={
             "fyers_id": username,
             "app_id": app_id,
-            "redirect_uri": "http://127.0.0.1:8080/",
+            "redirect_uri": "https://optionmatrix2.streamlit.app/",
             "appType": "100",
             "code_challenge": "",
             "state": "sample",
@@ -173,39 +174,48 @@ def _generate_token():
     return r5d["access_token"]
 
 
+@st.cache_resource(ttl=43200)  # 12 hours — generates once, shared across ALL sessions
+def _get_cached_token(_date_key):
+    """
+    Generate and cache token globally. The _date_key param ensures
+    a new token is generated each day. Raises on failure so
+    st.cache_resource never caches an error.
+    """
+    # Retry with backoff for 429 rate limiting
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            token = _generate_token_inner()
+            return token
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                wait = (attempt + 1) * 10  # 10s, 20s, 30s
+                time.sleep(wait)
+                if attempt == max_retries - 1:
+                    raise RuntimeError(
+                        f"Fyers API rate limited (429) after {max_retries} retries. "
+                        f"Wait a few minutes and refresh the page."
+                    ) from e
+            else:
+                raise
+        except Exception:
+            raise
+    raise RuntimeError("Token generation failed after retries.")
+
+
 def get_fyers_client():
     """
     Get or create Fyers API client.
-    Token is cached in session_state['_fc'] and fyers_token.json (per day).
+    Token cached globally via @st.cache_resource (one generation per day).
+    Client instance cached in session_state['_fc'] per session.
     """
     _SS = st.session_state
     if "_fc" in _SS and _SS["_fc"] is not None:
         return _SS["_fc"]
 
+    # Use today's date as cache key — new token each day
     today_str = date.today().isoformat()
-    token = None
-
-    # Try reading cached token from file
-    if os.path.exists(TOKEN_FILE):
-        try:
-            with open(TOKEN_FILE, "r") as fh:
-                cached = json.load(fh)
-            if cached.get("date") == today_str and cached.get("token"):
-                token = cached["token"]
-        except Exception:
-            pass
-
-    # Generate fresh token if needed
-    if token is None:
-        token = _generate_token()
-        try:
-            with open(TOKEN_FILE, "w") as fh:
-                json.dump(
-                    {"date": today_str, "token": token, "ts": get_ist_now().isoformat()},
-                    fh,
-                )
-        except Exception:
-            pass
+    token = _get_cached_token(today_str)
 
     client_id = st.secrets["FYERS_CLIENT_ID"]
     fyers = fyersModel.FyersModel(
@@ -216,11 +226,10 @@ def get_fyers_client():
 
 
 def refresh_token():
-    """Force regenerate token (useful if expired mid-day)."""
+    """Force regenerate token (clears global cache)."""
     _SS = st.session_state
     _SS.pop("_fc", None)
-    if os.path.exists(TOKEN_FILE):
-        os.remove(TOKEN_FILE)
+    _get_cached_token.clear()  # clear @st.cache_resource cache
     return get_fyers_client()
 
 
