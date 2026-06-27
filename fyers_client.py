@@ -138,7 +138,7 @@ def _generate_token_inner():
         json={
             "fyers_id": username,
             "app_id": app_id,
-            "redirect_uri": "https://optionmatrix2.streamlit.app/",
+            "redirect_uri": "http://127.0.0.1:8080/",
             "appType": app_type,
             "code_challenge": "",
             "state": "sample",
@@ -636,4 +636,3 @@ def dark_chart_layout(title="", height=500, yaxis_title="", xaxis_title=""):
         ),
         hovermode="x unified",
     )
-
