@@ -78,15 +78,17 @@ def market_status_html():
 
 def _generate_token_inner():
     """
-    5-step TOTP login flow for Fyers API v3.
-    Reads credentials from st.secrets. Returns access_token string.
-    Raises on any failure (safe for @st.cache_resource).
+    TOTP login flow for Fyers API v3.
+    Steps 1-3: TOTP authentication.
+    Step 4: Use bearer to authorize app and get auth_code via redirect.
+    Step 5: Validate auth_code to get final access_token.
     """
     client_id = str(st.secrets["FYERS_CLIENT_ID"])
     secret_key = str(st.secrets["FYERS_SECRET_KEY"])
     username = str(st.secrets["FYERS_USERNAME"])
     pin = str(st.secrets["FYERS_PIN"])
     totp_key = str(st.secrets["FYERS_TOTP_KEY"])
+    redirect_uri = "http://127.0.0.1:8080/"
 
     # Step 1 — Send login OTP
     r1 = requests.post(
@@ -129,61 +131,106 @@ def _generate_token_inner():
         raise RuntimeError(f"Step 3 failed: {r3d}")
     bearer = r3d["data"]["access_token"]
 
-    # Step 4 — Get auth code
-    app_id_parts = client_id.split("-")
-    app_id = app_id_parts[0]
-    app_type = app_id_parts[1] if len(app_id_parts) > 1 else "100"
-    r4 = requests.post(
-        "https://api-t1.fyers.in/api/v3/token",
-        json={
-            "fyers_id": username,
-            "app_id": app_id,
-            "redirect_uri": "http://127.0.0.1:8080/",
-            "appType": app_type,
-            "code_challenge": "",
-            "state": "sample",
-            "scope": "",
-            "nonce": "",
-            "response_type": "code",
-            "create_cookie": True,
-        },
-        headers={"Authorization": f"Bearer {bearer}"},
+    # Step 4 — Authorize app and get auth_code
+    # Use SessionModel to build the auth URL, then GET it with bearer cookie
+    session = fyersModel.SessionModel(
+        client_id=client_id,
+        secret_key=secret_key,
+        redirect_uri=redirect_uri,
+        response_type="code",
+        grant_type="authorization_code",
     )
-    r4d = r4.json() if r4.content else {}
-    if r4.status_code != 200:
-        raise RuntimeError(
-            f"Step 4 failed (HTTP {r4.status_code}): {r4d}. "
-            f"Check: client_id={client_id}, app_id={app_id}, appType={app_type}"
+    auth_url = session.generate_authcode()
+
+    # GET the auth URL with bearer token — Fyers redirects to redirect_uri?auth_code=XXX
+    s = requests.Session()
+    s.headers.update({"Authorization": f"Bearer {bearer}"})
+    s.cookies.set("FYERS_TOKEN", bearer, domain=".fyers.in")
+    r4 = s.get(auth_url, allow_redirects=True)
+
+    # Extract auth_code from final URL (after redirect)
+    auth_code = ""
+    final_url = str(r4.url)
+    if "auth_code=" in final_url:
+        auth_code = final_url.split("auth_code=")[1].split("&")[0]
+    elif "code=" in final_url:
+        auth_code = final_url.split("code=")[1].split("&")[0]
+
+    # Also check response text for auth_code (some flows return it in body)
+    if not auth_code and r4.text:
+        import re as _re
+        m = _re.search(r'auth_code=([^&"]+)', r4.text)
+        if m:
+            auth_code = m.group(1)
+
+    # Fallback: try POST /api/v3/token approach
+    if not auth_code:
+        app_id_parts = client_id.split("-")
+        app_id = app_id_parts[0]
+        app_type = app_id_parts[1] if len(app_id_parts) > 1 else "100"
+        r4b = requests.post(
+            "https://api-t1.fyers.in/api/v3/token",
+            json={
+                "fyers_id": username,
+                "app_id": app_id,
+                "redirect_uri": redirect_uri,
+                "appType": app_type,
+                "code_challenge": "",
+                "state": "sample",
+                "scope": "",
+                "nonce": "",
+                "response_type": "code",
+                "create_cookie": True,
+            },
+            headers={"Authorization": f"Bearer {bearer}"},
         )
-    # Extract access token — Fyers v3 TOTP flow returns it directly in data.auth
-    # This is a JWT with sub="access_token", NOT an auth code for validate-authcode
-    auth_token = ""
-    data = r4d.get("data", {})
-    if isinstance(data, dict) and data.get("auth"):
-        auth_token = data["auth"]
-    else:
-        # Fallback: try URL-based extraction + validate-authcode (older flow)
-        url_field = r4d.get("Url") or r4d.get("url") or ""
+        r4bd = r4b.json() if r4b.content else {}
+
+        # Try extracting from Url field
+        url_field = r4bd.get("Url") or r4bd.get("url") or ""
         if "auth_code=" in url_field:
             auth_code = url_field.split("auth_code=")[1].split("&")[0]
-            app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
-            r5 = requests.post(
-                "https://api-t1.fyers.in/api/v3/validate-authcode",
-                json={
-                    "grant_type": "authorization_code",
-                    "appIdHash": app_hash,
-                    "code": auth_code,
-                },
+        elif "code=" in url_field:
+            auth_code = url_field.split("code=")[1].split("&")[0]
+
+        # If still no auth_code, try data.auth_code
+        if not auth_code:
+            data = r4bd.get("data", {})
+            if isinstance(data, dict):
+                auth_code = data.get("authorization_code", data.get("auth_code", ""))
+
+        if not auth_code:
+            raise RuntimeError(
+                f"Could not extract auth_code. "
+                f"GET response URL: {final_url}, "
+                f"POST response: {r4bd}"
             )
-            r5d = r5.json() if r5.content else {}
-            if r5.status_code == 200 and "access_token" in r5d:
-                return r5d["access_token"]
 
-    if not auth_token:
-        raise RuntimeError(f"No access token obtained from Step 4: {r4d}")
+    # Step 5 — Validate auth_code → access_token
+    session.set_token(auth_code)
+    response = session.generate_token()
 
-    # Format: client_id:access_token for FyersModel
-    return f"{client_id}:{auth_token}"
+    if isinstance(response, dict) and "access_token" in response:
+        return response["access_token"]
+
+    # Fallback: manual validate-authcode
+    app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
+    r5 = requests.post(
+        "https://api-t1.fyers.in/api/v3/validate-authcode",
+        json={
+            "grant_type": "authorization_code",
+            "appIdHash": app_hash,
+            "code": auth_code,
+        },
+    )
+    r5d = r5.json() if r5.content else {}
+    if r5.status_code == 200 and "access_token" in r5d:
+        return r5d["access_token"]
+
+    raise RuntimeError(
+        f"Step 5 failed: session.generate_token()={response}, "
+        f"validate-authcode={r5d}"
+    )
 
 
 @st.cache_resource(ttl=43200)  # 12 hours — generates once, shared across ALL sessions
