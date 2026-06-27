@@ -235,47 +235,71 @@ def _generate_token_inner():
             return m.group(1)
         return ""
 
-    # Try with allow_redirects=False first to catch 302
+    # ── Pre-set cookies from Step 4a data.auth BEFORE any GET ──
+    data_auth = r4a_data.get("auth", "")
+    if data_auth:
+        # Try multiple cookie names and domains — Fyers varies across versions
+        for cookie_domain in ["api-t1.fyers.in", ".fyers.in"]:
+            s.cookies.set("FYERS_TOKEN", data_auth, domain=cookie_domain, path="/")
+
+    # Also check if redirectUrl already has auth_code
+    redirect_url_from_4a = r4a_data.get("redirectUrl", "")
+    if redirect_url_from_4a:
+        auth_code = _extract_auth_code_from_text(redirect_url_from_4a)
+        if auth_code:
+            # Found auth_code in Step 4a redirectUrl — go to Step 5
+            session_obj = fyersModel.SessionModel(
+                client_id=client_id, secret_key=secret_key,
+                redirect_uri=redirect_uri, response_type="code",
+                grant_type="authorization_code",
+            )
+            session_obj.set_token(auth_code)
+            resp5 = session_obj.generate_token()
+            if isinstance(resp5, dict) and "access_token" in resp5:
+                return resp5["access_token"]
+
+    # ── Attempt 1: GET with cookies pre-set, no redirects ──
     r4b = s.get(auth_url, allow_redirects=False)
 
     auth_code = ""
-    # Check 302 redirect Location header
     if r4b.status_code in (301, 302, 303, 307, 308):
-        location = r4b.headers.get("Location", "")
-        auth_code = _extract_auth_code_from_text(location)
+        auth_code = _extract_auth_code_from_text(
+            r4b.headers.get("Location", ""))
 
-    # Parse response body — endpoint may return 200 with auth_code in HTML/JS
+    # Check response body for auth_code
     if not auth_code:
-        body = r4b.text if hasattr(r4b, 'text') else ""
-        auth_code = _extract_auth_code_from_text(body)
+        auth_code = _extract_auth_code_from_text(
+            r4b.text if hasattr(r4b, 'text') else "")
 
-    # Try following redirects — auth_code in final URL or response body
+    # ── Attempt 2: GET with redirects followed ──
     if not auth_code:
         r4c = s.get(auth_url, allow_redirects=True)
-        final_url = str(r4c.url)
-        auth_code = _extract_auth_code_from_text(final_url)
+        auth_code = _extract_auth_code_from_text(str(r4c.url))
         if not auth_code:
-            auth_code = _extract_auth_code_from_text(r4c.text if hasattr(r4c, 'text') else "")
+            auth_code = _extract_auth_code_from_text(
+                r4c.text if hasattr(r4c, 'text') else "")
 
-    # Fallback — set data.auth as explicit cookie and retry
-    if not auth_code:
-        data_auth = r4ad.get("data", {}).get("auth", "")
-        if data_auth:
-            s.cookies.set("FYERS_TOKEN", data_auth, domain="api-t1.fyers.in")
-            r4d = s.get(auth_url, allow_redirects=False)
-            if r4d.status_code in (301, 302, 303, 307, 308):
-                location = r4d.headers.get("Location", "")
-                auth_code = _extract_auth_code_from_text(location)
+    # ── Attempt 3: Set auth as Authorization header (not just cookie) ──
+    if not auth_code and data_auth:
+        s2 = requests.Session()
+        s2.headers.update(s.headers)
+        s2.headers["Authorization"] = f"Bearer {data_auth}"
+        s2.cookies.update(s.cookies)
+        r4d = s2.get(auth_url, allow_redirects=False)
+        if r4d.status_code in (301, 302, 303, 307, 308):
+            auth_code = _extract_auth_code_from_text(
+                r4d.headers.get("Location", ""))
+        if not auth_code:
+            auth_code = _extract_auth_code_from_text(
+                r4d.text if hasattr(r4d, 'text') else "")
+        if not auth_code:
+            r4e = s2.get(auth_url, allow_redirects=True)
+            auth_code = _extract_auth_code_from_text(str(r4e.url))
             if not auth_code:
-                auth_code = _extract_auth_code_from_text(r4d.text if hasattr(r4d, 'text') else "")
-            # Also try following redirects with the cookie
-            if not auth_code:
-                r4e = s.get(auth_url, allow_redirects=True)
-                auth_code = _extract_auth_code_from_text(str(r4e.url))
-                if not auth_code:
-                    auth_code = _extract_auth_code_from_text(r4e.text if hasattr(r4e, 'text') else "")
+                auth_code = _extract_auth_code_from_text(
+                    r4e.text if hasattr(r4e, 'text') else "")
 
-    # Fallback — try direct POST to validate-authcode / token endpoint
+    # ── Attempt 4: Direct POST to validate-authcode ──
     if not auth_code:
         try:
             import hashlib as _hl
@@ -287,30 +311,29 @@ def _generate_token_inner():
                 json={
                     "grant_type": "authorization_code",
                     "appIdHash": app_hash,
-                    "code": r4ad.get("data", {}).get("authorization_code",
-                           r4ad.get("data", {}).get("auth_code", "")),
+                    "code": r4a_data.get("authorization_code",
+                           r4a_data.get("auth_code", "")),
                 },
             )
             r4fd = r4f.json() if r4f.content else {}
             if r4fd.get("access_token"):
-                # Got access_token directly — return it, skip Step 5
                 return r4fd["access_token"]
-            # Check if it returned an auth_code instead
-            ac = r4fd.get("data", {}).get("auth_code", "") if isinstance(r4fd.get("data"), dict) else ""
+            ac = (r4fd.get("data", {}).get("auth_code", "")
+                  if isinstance(r4fd.get("data"), dict) else "")
             if ac:
                 auth_code = ac
         except Exception:
-            pass  # Non-critical fallback
+            pass
 
     if not auth_code:
-        # Debug info for troubleshooting
         cookies_str = str(dict(s.cookies))
         body_snippet = (r4b.text[:500] if hasattr(r4b, 'text') else "")
         raise RuntimeError(
             f"Could not get auth_code. "
             f"4b status={r4b.status_code}, "
             f"body_snippet={body_snippet!r}, "
-            f"4a_data_keys={list(r4ad.get('data', {}).keys())}, "
+            f"4a_data_keys={list(r4a_data.keys())}, "
+            f"4a_redirectUrl={redirect_url_from_4a!r}, "
             f"session_cookies={cookies_str}"
         )
 
