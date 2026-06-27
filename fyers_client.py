@@ -202,9 +202,10 @@ def _generate_token_inner():
     data_auth = r4a_data.get("auth", "")
 
     auth_code = ""
+    strategy_errors = {}  # Capture what each strategy returned
 
-    # ── Strategy 1: Try data.auth as the auth_code directly ──
-    if data_auth and not auth_code:
+    # ── Strategy 1: Try data.auth as the auth_code via SDK ──
+    if data_auth:
         try:
             session_obj = fyersModel.SessionModel(
                 client_id=client_id, secret_key=secret_key,
@@ -212,14 +213,15 @@ def _generate_token_inner():
                 grant_type="authorization_code",
             )
             session_obj.set_token(data_auth)
-            resp5 = session_obj.generate_token()
-            if isinstance(resp5, dict) and "access_token" in resp5:
-                return resp5["access_token"]
-        except Exception:
-            pass
+            resp1 = session_obj.generate_token()
+            if isinstance(resp1, dict) and "access_token" in resp1:
+                return resp1["access_token"]
+            strategy_errors["s1_sdk"] = str(resp1)[:200]
+        except Exception as e:
+            strategy_errors["s1_sdk"] = str(e)[:200]
 
-    # ── Strategy 2: POST validate-authcode with data.auth as code ──
-    if data_auth and not auth_code:
+    # ── Strategy 2a: POST validate-authcode (api-t1) ──
+    if data_auth:
         try:
             r_val = requests.post(
                 "https://api-t1.fyers.in/api/v3/validate-authcode",
@@ -232,22 +234,56 @@ def _generate_token_inner():
             r_vald = r_val.json() if r_val.content else {}
             if r_vald.get("access_token"):
                 return r_vald["access_token"]
-        except Exception:
-            pass
+            strategy_errors["s2a_validate"] = str(r_vald)[:200]
+        except Exception as e:
+            strategy_errors["s2a_validate"] = str(e)[:200]
 
-    # ── Strategy 3: Construct token as client_id:bearer (some API versions) ──
-    if not auth_code:
+    # ── Strategy 2b: POST validate-authcode (api.fyers.in) ──
+    if data_auth:
         try:
-            test_token = f"{client_id}:{bearer}"
-            test_fyers = fyersModel.FyersModel(
-                client_id=client_id, is_async=False,
-                token=test_token, log_path=""
+            r_val2 = requests.post(
+                "https://api.fyers.in/api/v3/validate-authcode",
+                json={
+                    "grant_type": "authorization_code",
+                    "appIdHash": app_hash,
+                    "code": data_auth,
+                },
             )
-            test_resp = test_fyers.get_profile()
-            if isinstance(test_resp, dict) and test_resp.get("code") == 200:
-                return test_token
-        except Exception:
-            pass
+            r_val2d = r_val2.json() if r_val2.content else {}
+            if r_val2d.get("access_token"):
+                return r_val2d["access_token"]
+            strategy_errors["s2b_validate_api"] = str(r_val2d)[:200]
+        except Exception as e:
+            strategy_errors["s2b_validate_api"] = str(e)[:200]
+
+    # ── Strategy 3a: client_id:bearer as token ──
+    try:
+        test_token = f"{client_id}:{bearer}"
+        test_fyers = fyersModel.FyersModel(
+            client_id=client_id, is_async=False,
+            token=test_token, log_path=""
+        )
+        test_resp = test_fyers.get_profile()
+        if isinstance(test_resp, dict) and test_resp.get("code") == 200:
+            return test_token
+        strategy_errors["s3a_bearer"] = str(test_resp)[:200]
+    except Exception as e:
+        strategy_errors["s3a_bearer"] = str(e)[:200]
+
+    # ── Strategy 3b: client_id:data_auth as token ──
+    if data_auth:
+        try:
+            test_token2 = f"{client_id}:{data_auth}"
+            test_fyers2 = fyersModel.FyersModel(
+                client_id=client_id, is_async=False,
+                token=test_token2, log_path=""
+            )
+            test_resp2 = test_fyers2.get_profile()
+            if isinstance(test_resp2, dict) and test_resp2.get("code") == 200:
+                return test_token2
+            strategy_errors["s3b_data_auth"] = str(test_resp2)[:200]
+        except Exception as e:
+            strategy_errors["s3b_data_auth"] = str(e)[:200]
 
     # ── Strategy 4: GET generate-authcode with cookie (legacy fallback) ──
     if data_auth:
@@ -285,10 +321,8 @@ def _generate_token_inner():
 
     if not auth_code:
         raise RuntimeError(
-            f"Could not get auth_code. All strategies failed. "
-            f"4a_data_keys={list(r4a_data.keys())}, "
-            f"data_auth_present={bool(data_auth)}, "
-            f"bearer_present={bool(bearer)}"
+            f"All strategies failed. "
+            f"strategy_results={json.dumps(strategy_errors)}"
         )
 
     # Step 5 — Validate auth_code → access_token
