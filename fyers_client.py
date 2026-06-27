@@ -169,7 +169,8 @@ def _generate_token_inner():
         raise RuntimeError(f"Step 4: no auth_code found in response: {r4d}")
 
     # Step 5 — Validate auth code → access token
-    app_hash = hashlib.sha256(f"{client_id}:{secret_key}".encode()).hexdigest()
+    app_id_full = f"{client_id}:{secret_key}"
+    app_hash = hashlib.sha256(app_id_full.encode()).hexdigest()
     r5 = requests.post(
         "https://api-t1.fyers.in/api/v3/validate-authcode",
         json={
@@ -178,10 +179,14 @@ def _generate_token_inner():
             "code": auth_code,
         },
     )
-    r5.raise_for_status()
-    r5d = r5.json()
+    r5d = r5.json() if r5.content else {}
+    if r5.status_code != 200:
+        raise RuntimeError(
+            f"Step 5 failed (HTTP {r5.status_code}): {r5d}. "
+            f"auth_code_len={len(auth_code)}, appIdHash={app_hash[:16]}..."
+        )
     if "access_token" not in r5d:
-        raise RuntimeError(f"Step 5 failed: {r5d}")
+        raise RuntimeError(f"Step 5: no access_token in response: {r5d}")
 
     return r5d["access_token"]
 
