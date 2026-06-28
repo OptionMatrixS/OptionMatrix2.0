@@ -16,7 +16,7 @@ st.set_page_config(
 
 from styles import inject_css
 from auth import show_login_page, has_access, init_db, TOOL_LABELS
-from fyers_client import get_ist_now, market_status_html, refresh_token, is_market_open
+from fyers_client import get_ist_now, market_status_html, refresh_token, is_market_open, render_fyers_login, is_fyers_connected
 
 # ── Tab imports ──────────────────────────────────────────────────────────────
 from spread_chart import render_spread_chart
@@ -227,17 +227,29 @@ def render_sidebar():
             unsafe_allow_html=True,
         )
 
-        # Market status
+        # Market status + Fyers connection status
+        fyers_status = (
+            '<span style="color:#26a69a;">🟢 Connected</span>'
+            if is_fyers_connected()
+            else '<span style="color:#ef5350;">🔴 Not Connected</span>'
+        )
         st.markdown(
             f"""
             <div style="background:#1e222d;border:1px solid #2a2e39;border-radius:6px;
                         padding:8px 12px;margin:8px 0;">
                 <span style="font-size:11px;color:#787b86;">MARKET: </span>
                 {market_status_html()}
+                <br/>
+                <span style="font-size:11px;color:#787b86;">FYERS: </span>
+                {fyers_status}
             </div>
             """,
             unsafe_allow_html=True,
         )
+
+        # Fyers login UI (only shows if not connected)
+        if not is_fyers_connected():
+            render_fyers_login()
 
         st.markdown(
             '<hr style="border-color:#2a2e39;margin:8px 0;">',
@@ -279,12 +291,9 @@ def render_sidebar():
         # Control buttons
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("🔄 Refresh", use_container_width=True, key="btn_refresh_token"):
-                try:
-                    refresh_token()
-                    st.success("Token refreshed!")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+            if st.button("🔄 Reconnect", use_container_width=True, key="btn_refresh_token"):
+                refresh_token()
+                st.rerun()
         with c2:
             if st.button("💾 Save", use_container_width=True, key="btn_save_inputs"):
                 save_user_state()
