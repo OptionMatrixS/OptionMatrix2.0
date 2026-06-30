@@ -1,379 +1,255 @@
 """
-app.py — Entry point for Option Matrix.
-Sidebar navigation, session state defaults, tab routing, persistence.
+auth.py — SQLite authentication system for Option Matrix
+Roles: admin, member, pending. Per-tab access control.
 """
 
-import streamlit as st
+import sqlite3
+import hashlib
 import json
 import os
+import streamlit as st
 
-st.set_page_config(
-    page_title="Option Matrix",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+DB_FILE = "option_matrix.db"
 
-from styles import inject_css
-from auth import show_login_page, has_access, init_db, TOOL_LABELS
-from fyers_client import get_ist_now, market_status_html, refresh_token, is_market_open, render_fyers_login, is_fyers_connected, auto_connect_fyers
-
-# ── Tab imports ──────────────────────────────────────────────────────────────
-from spread_chart import render_spread_chart
-from multiplier_chart import render_multiplier
-from iv_calculator import render_iv_calculator
-from spread_tracker import render_spread_tracker
-from historical_backtest import render_backtest
-from position_analysis import render_positions
-from strategy_builder import render_strategy
-from live_bhavcopy import render_bhavcopy
-from quiz import render_quiz
-from admin_panel import render_admin
-
-# ── Constants ────────────────────────────────────────────────────────────────
-
-STATE_FILE = "user_state.json"
-
-TAB_CONFIG = [
-    ("spread", "📊 Spread Chart"),
-    ("multiplier", "✖️ Multiplier"),
-    ("iv", "🌡️ IV Calculator"),
-    ("tracker", "📋 Spread Tracker"),
-    ("backtest", "🕰️ Historical Backtest"),
-    ("positions", "📂 Position Analysis"),
-    ("strategy", "🏗️ Strategy Builder"),
-    ("bhavcopy", "📋 Live Bhavcopy"),
-    ("quiz", "🎓 NISM Quiz"),
+TOOL_KEYS = [
+    "spread", "multiplier", "iv", "tracker",
+    "backtest", "positions", "strategy", "bhavcopy", "quiz",
 ]
 
-TAB_RENDERERS = {
-    "spread": render_spread_chart,
-    "multiplier": render_multiplier,
-    "iv": render_iv_calculator,
-    "tracker": render_spread_tracker,
-    "backtest": render_backtest,
-    "positions": render_positions,
-    "strategy": render_strategy,
-    "bhavcopy": render_bhavcopy,
-    "quiz": render_quiz,
+TOOL_LABELS = {
+    "spread": "📊 Spread Chart",
+    "multiplier": "✖️ Multiplier",
+    "iv": "🌡️ IV Calculator",
+    "tracker": "📋 Spread Tracker",
+    "backtest": "🕰️ Historical Backtest",
+    "positions": "📂 Position Analysis",
+    "strategy": "🏗️ Strategy Builder",
+    "bhavcopy": "📋 Live Bhavcopy",
+    "quiz": "🎓 NISM Quiz",
 }
 
 
-# ── Session State Defaults ───────────────────────────────────────────────────
-
-def init_session_state():
-    """Initialize all session state keys with defaults."""
-    _SS = st.session_state
-    defaults = {
-        # Auth
-        "logged_in": False,
-        "username": "",
-        "role": "",
-        "access": [],
-        "active_tab": "spread",
-        # Spread Chart
-        "sp_num_legs": 2,
-        "sp_chart_type": "Line",
-        "sp_timeframe": "1",
-        "sp_live_on": False,
-        "sp_live_hist": [],
-        "sp_last_tick": 0,
-        "sp_show_greeks": False,
-        # Multiplier
-        "mul_sensex_strike": 0,
-        "mul_nifty_strike": 0,
-        "mul_timeframe": "1",
-        # IV Calculator
-        "iv_index": "NIFTY",
-        "iv_num_expiries": 2,
-        # Spread Tracker
-        "trk_num_spreads": 1,
-        # Backtest
-        "bt_num_legs": 2,
-        "bt_timeframe": "1",
-        # Position Analysis
-        "pos_num_positions": 1,
-        # Strategy Builder
-        "strat_num_legs": 2,
-        "strat_preset": "Custom",
-        # Bhavcopy
-        "bhav_mode": "OPTIDX",
-        "bhav_index": "NIFTY",
-    }
-    for k, v in defaults.items():
-        if k not in _SS:
-            _SS[k] = v
+def _get_conn():
+    """Get SQLite connection."""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-# ── Persistence ──────────────────────────────────────────────────────────────
+def init_db():
+    """Initialize the database and create default admin user if needed."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'pending',
+            access TEXT NOT NULL DEFAULT '[]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
 
-PERSIST_KEYS = [
-    "active_tab", "sp_num_legs", "sp_chart_type", "sp_timeframe", "sp_show_greeks",
-    "mul_sensex_strike", "mul_nifty_strike", "mul_timeframe",
-    "iv_index", "iv_num_expiries", "trk_num_spreads",
-    "bt_num_legs", "bt_timeframe", "pos_num_positions",
-    "strat_num_legs", "strat_preset", "bhav_mode", "bhav_index",
-]
+    # Create default admin if not exists
+    c.execute("SELECT id FROM users WHERE username = ?", ("admin",))
+    if not c.fetchone():
+        pw_hash = _hash_password("admin123")
+        all_tools = json.dumps(TOOL_KEYS)
+        c.execute(
+            "INSERT INTO users (username, password_hash, role, access) VALUES (?, ?, ?, ?)",
+            ("admin", pw_hash, "admin", all_tools),
+        )
+        conn.commit()
+    conn.close()
 
 
-def _make_serializable(obj):
-    """Convert non-serializable types for JSON."""
-    if isinstance(obj, set):
-        return list(obj)
-    if hasattr(obj, "to_dict"):
-        return None  # skip DataFrames
-    if hasattr(obj, "isoformat"):
-        return obj.isoformat()
-    return obj
+def _hash_password(password):
+    """SHA-256 password hash."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def save_user_state():
-    """Save user inputs to JSON file keyed by username."""
-    _SS = st.session_state
-    username = _SS.get("username", "")
-    if not username:
-        return
+def register_user(username, password):
+    """Register a new user with 'pending' role. Returns (success, message)."""
+    if not username or not password:
+        return False, "Username and password are required."
+    if len(password) < 4:
+        return False, "Password must be at least 4 characters."
 
-    data = {}
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-
-    user_state = {}
-    for key in PERSIST_KEYS:
-        if key in _SS:
-            val = _make_serializable(_SS[key])
-            if val is not None:
-                user_state[key] = val
-
-    # Also save leg configs for spread chart
-    for i in range(1, 7):
-        for suffix in ["_index", "_expiry", "_strike", "_opt_type", "_buy_sell", "_ratio"]:
-            k = f"sp_leg{i}{suffix}"
-            if k in _SS:
-                user_state[k] = _make_serializable(_SS[k])
-
-    # Strategy leg configs
-    for i in range(1, 11):
-        for suffix in ["_index", "_expiry", "_strike", "_opt_type", "_buy_sell", "_lots"]:
-            k = f"strat_leg{i}{suffix}"
-            if k in _SS:
-                user_state[k] = _make_serializable(_SS[k])
-
-    data[username] = user_state
+    conn = _get_conn()
+    c = conn.cursor()
     try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(data, f, indent=2, default=str)
-    except Exception:
-        pass
+        c.execute(
+            "INSERT INTO users (username, password_hash, role, access) VALUES (?, ?, ?, ?)",
+            (username.lower().strip(), _hash_password(password), "pending", "[]"),
+        )
+        conn.commit()
+        return True, "Registration successful. Waiting for admin approval."
+    except sqlite3.IntegrityError:
+        return False, "Username already exists."
+    finally:
+        conn.close()
 
 
-def load_user_state():
-    """Restore user inputs from JSON file."""
+def login_user(username, password):
+    """Validate credentials. Returns (success, user_dict or error_message)."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT * FROM users WHERE username = ? AND password_hash = ?",
+        (username.lower().strip(), _hash_password(password)),
+    )
+    row = c.fetchone()
+    conn.close()
+
+    if not row:
+        return False, "Invalid username or password."
+
+    user = dict(row)
+    user["access"] = json.loads(user.get("access", "[]"))
+    return True, user
+
+
+def get_user(username):
+    """Get user dict by username."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE username = ?", (username.lower().strip(),))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        user = dict(row)
+        user["access"] = json.loads(user.get("access", "[]"))
+        return user
+    return None
+
+
+def get_all_users():
+    """Get all users for admin panel."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM users ORDER BY created_at DESC")
+    rows = c.fetchall()
+    conn.close()
+    users = []
+    for row in rows:
+        u = dict(row)
+        u["access"] = json.loads(u.get("access", "[]"))
+        users.append(u)
+    return users
+
+
+def update_user_role(username, role):
+    """Update user role (admin/member/pending)."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET role = ? WHERE username = ?",
+        (role, username.lower().strip()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_user_access(username, tools):
+    """Update user's tool access list."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET access = ? WHERE username = ?",
+        (json.dumps(tools), username.lower().strip()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_user(username):
+    """Delete a user."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM users WHERE username = ?", (username.lower().strip(),))
+    conn.commit()
+    conn.close()
+
+
+def update_password(username, new_password):
+    """Update user's password."""
+    conn = _get_conn()
+    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET password_hash = ? WHERE username = ?",
+        (_hash_password(new_password), username.lower().strip()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def has_access(username, tool_key):
+    """Check if user has access to a specific tool/tab."""
+    user = get_user(username)
+    if not user:
+        return False
+    if user["role"] == "admin":
+        return True
+    return tool_key in user.get("access", [])
+
+
+def show_login_page():
+    """Render login/register page. Returns True if logged in."""
     _SS = st.session_state
-    username = _SS.get("username", "")
-    if not username:
-        return
+    if _SS.get("logged_in"):
+        return True
 
-    if not os.path.exists(STATE_FILE):
-        return
-
-    try:
-        with open(STATE_FILE, "r") as f:
-            data = json.load(f)
-        user_state = data.get(username, {})
-        for k, v in user_state.items():
-            if k not in _SS or _SS[k] in (None, "", 0, [], False):
-                _SS[k] = v
-    except Exception:
-        pass
-
-
-# ── Sidebar ──────────────────────────────────────────────────────────────────
-
-def render_sidebar():
-    """Render the sidebar with navigation, market status, and controls."""
-    _SS = st.session_state
-
-    with st.sidebar:
-        # Title
-        st.markdown(
-            """
-            <div style="text-align:center;padding:8px 0;">
-                <div style="font-size:24px;font-weight:700;color:#d1d4dc;">⚡ Option Matrix</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            '<hr style="border-color:#2a2e39;margin:4px 0;">',
-            unsafe_allow_html=True,
-        )
-
-        # User info
-        role_icon = "🔑" if _SS["role"] == "admin" else "🔓"
-        role_label = _SS["role"].title()
-        st.markdown(
-            f"""
-            <div style="padding:4px 0;">
-                <span style="color:#d1d4dc;">👤 {_SS['username']}</span>
-                <span style="color:#787b86;margin-left:8px;">{role_icon} {role_label}</span>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Market status + Fyers connection status
-        fyers_status = (
-            '<span style="color:#26a69a;">🟢 Connected</span>'
-            if is_fyers_connected()
-            else '<span style="color:#ef5350;">🔴 Not Connected</span>'
-        )
-        st.markdown(
-            f"""
-            <div style="background:#1e222d;border:1px solid #2a2e39;border-radius:6px;
-                        padding:8px 12px;margin:8px 0;">
-                <span style="font-size:11px;color:#787b86;">MARKET: </span>
-                {market_status_html()}
-                <br/>
-                <span style="font-size:11px;color:#787b86;">FYERS: </span>
-                {fyers_status}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        # Fyers login UI (only shows if not connected)
-        if not is_fyers_connected():
-            render_fyers_login()
-
-        st.markdown(
-            '<hr style="border-color:#2a2e39;margin:8px 0;">',
-            unsafe_allow_html=True,
-        )
-
-        # Navigation buttons
-        for tool_key, label in TAB_CONFIG:
-            if has_access(_SS["username"], tool_key):
-                is_active = _SS["active_tab"] == tool_key
-                btn_style = "primary" if is_active else "secondary"
-                if st.button(
-                    label,
-                    key=f"nav_{tool_key}",
-                    use_container_width=True,
-                    type=btn_style,
-                ):
-                    save_user_state()
-                    _SS["active_tab"] = tool_key
-                    st.rerun()
-
-        # Admin panel (admin only)
-        if _SS["role"] == "admin":
-            if st.button(
-                "⚙️ Admin Panel",
-                key="nav_admin",
-                use_container_width=True,
-                type="primary" if _SS["active_tab"] == "admin" else "secondary",
-            ):
-                save_user_state()
-                _SS["active_tab"] = "admin"
-                st.rerun()
-
-        st.markdown(
-            '<hr style="border-color:#2a2e39;margin:8px 0;">',
-            unsafe_allow_html=True,
-        )
-
-        # Control buttons
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🔄 Reconnect", use_container_width=True, key="btn_refresh_token"):
-                refresh_token()
-                st.rerun()
-        with c2:
-            if st.button("💾 Save", use_container_width=True, key="btn_save_inputs"):
-                save_user_state()
-                st.success("Saved!")
-
-        if st.button("🚪 Logout", use_container_width=True, key="btn_logout"):
-            save_user_state()
-            for key in list(_SS.keys()):
-                del _SS[key]
-            st.rerun()
-
-        st.markdown(
-            '<hr style="border-color:#2a2e39;margin:8px 0;">',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown(
-            """
-            <div style="text-align:center;padding:4px;color:#787b86;font-size:10px;">
-                Option Matrix v2.0 · Fyers API v3
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    """Main application entry point."""
-    inject_css()
     init_db()
-    init_session_state()
 
-    _SS = st.session_state
+    st.markdown(
+        """
+        <div style="text-align:center;padding:40px 0 20px;">
+            <div style="font-size:42px;font-weight:700;color:#d1d4dc;">⚡ Option Matrix</div>
+            <div style="font-size:14px;color:#787b86;margin-top:4px;">
+                Multi-Tab Options Analytics Platform · Fyers API v3
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # Show login page if not logged in
-    if not _SS.get("logged_in"):
-        show_login_page()
-        return
+    tab1, tab2 = st.tabs(["🔑 Login", "📝 Register"])
 
-    # Load saved state on first run after login
-    if not _SS.get("_state_loaded"):
-        load_user_state()
-        _SS["_state_loaded"] = True
+    with tab1:
+        with st.form("login_form"):
+            lu = st.text_input("Username", key="login_user")
+            lp = st.text_input("Password", type="password", key="login_pass")
+            submitted = st.form_submit_button("Login", use_container_width=True)
+            if submitted:
+                ok, result = login_user(lu, lp)
+                if ok:
+                    if result["role"] == "pending":
+                        st.warning("⏳ Your account is pending admin approval.")
+                    else:
+                        _SS["logged_in"] = True
+                        _SS["username"] = result["username"]
+                        _SS["role"] = result["role"]
+                        _SS["access"] = result["access"]
+                        st.rerun()
+                else:
+                    st.error(result)
 
-    # Auto-connect to Fyers API (generates token via TOTP)
-    if not is_fyers_connected():
-        with st.spinner("🔄 Connecting to Fyers API..."):
-            auto_connect_fyers()
+    with tab2:
+        with st.form("register_form"):
+            ru = st.text_input("Username", key="reg_user")
+            rp = st.text_input("Password", type="password", key="reg_pass")
+            rp2 = st.text_input("Confirm Password", type="password", key="reg_pass2")
+            submitted = st.form_submit_button("Register", use_container_width=True)
+            if submitted:
+                if rp != rp2:
+                    st.error("Passwords do not match.")
+                else:
+                    ok, msg = register_user(ru, rp)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
-    # Render sidebar
-    render_sidebar()
-
-    # Route to active tab
-    active = _SS.get("active_tab", "spread")
-
-    if active == "admin" and _SS["role"] == "admin":
-        render_admin()
-    elif active in TAB_RENDERERS:
-        if has_access(_SS["username"], active):
-            TAB_RENDERERS[active]()
-        else:
-            st.markdown(
-                """
-                <div style="text-align:center;padding:80px 0;">
-                    <div style="font-size:48px;">🔒</div>
-                    <div style="font-size:18px;color:#787b86;margin-top:12px;">
-                        You don't have access to this tool.
-                    </div>
-                    <div style="font-size:14px;color:#787b86;margin-top:8px;">
-                        Contact your admin to request access.
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    else:
-        st.info("Select a tab from the sidebar.")
-
-
-if __name__ == "__main__":
-    main()
+    return False
