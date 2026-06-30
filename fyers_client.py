@@ -74,67 +74,168 @@ def market_status_html():
         return f'<span style="color:#ef5350;">🔴 CLOSED</span> <span style="color:#787b86;font-size:12px;">{ts}</span>'
 
 
-# ── Token Generation (Manual Auth Flow) ──────────────────────────────────────
-# Fyers API v3 (2025-2026) requires browser-based login for auth_code.
-# The TOTP→cookie→redirect flow no longer works programmatically.
-# This flow: generate URL → user logs in → paste redirect URL → get token.
+# ── Fyers Credentials ────────────────────────────────────────────────────────
+# Read from st.secrets (recommended) or fallback to hardcoded defaults.
+# To use st.secrets, create a .streamlit/secrets.toml file with:
+#   FYERS_CLIENT_ID = "FAJ31919"
+#   FYERS_PIN = "7900"
+#   FYERS_APP_ID = "A0B798UIQA"
+#   FYERS_APP_TYPE = "100"
+#   FYERS_APP_SECRET = "2SZ9WZVRPX"
+#   FYERS_TOTP_SECRET = "PVFWL7TQ7SDT6VWPSG7HOV3XGRYCPI2D"
+#   FYERS_REDIRECT_URI = "http://127.0.0.1:8080/"
 
-def get_auth_url():
-    """Generate the Fyers OAuth authorization URL for manual login."""
-    client_id = str(st.secrets["FYERS_CLIENT_ID"])
-    secret_key = str(st.secrets["FYERS_SECRET_KEY"])
-    redirect_uri = str(st.secrets.get("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html"))
+def _get_fyers_cred(key, default=""):
+    """Get Fyers credential from st.secrets with fallback to default."""
+    try:
+        return str(st.secrets[key])
+    except Exception:
+        return default
 
-    session = fyersModel.SessionModel(
-        client_id=client_id,
-        secret_key=secret_key,
-        redirect_uri=redirect_uri,
-        response_type="code",
-        grant_type="authorization_code",
+# Hardcoded defaults (used when st.secrets is not configured)
+_DEFAULTS = {
+    "FYERS_CLIENT_ID": "FAJ31919",
+    "FYERS_PIN": "7900",
+    "FYERS_APP_ID": "A0B798UIQA",
+    "FYERS_APP_TYPE": "100",
+    "FYERS_APP_SECRET": "2SZ9WZVRPX",
+    "FYERS_TOTP_SECRET": "PVFWL7TQ7SDT6VWPSG7HOV3XGRYCPI2D",
+    "FYERS_REDIRECT_URI": "http://127.0.0.1:8080/",
+}
+
+
+def _cred(key):
+    """Shorthand to get credential with fallback."""
+    return _get_fyers_cred(key, _DEFAULTS.get(key, ""))
+
+
+# ── Auto-TOTP Token Generation ──────────────────────────────────────────────
+# Fully automated flow using Fyers TOTP API (from Fyers support).
+# Flow: verify client → generate TOTP → verify TOTP → verify PIN →
+#       get auth code → validate auth code → access token.
+# Requires TOTP to be enabled: https://myaccount.fyers.in/ManageAccount
+
+_VAGATOR_BASE = "https://api-t2.fyers.in/vagator/v2"
+_API_V3_BASE = "https://api-t1.fyers.in/api/v3"
+_URL_SEND_LOGIN_OTP = _VAGATOR_BASE + "/send_login_otp"
+_URL_VERIFY_OTP = _VAGATOR_BASE + "/verify_otp"
+_URL_VERIFY_PIN = _VAGATOR_BASE + "/verify_pin"
+_URL_TOKEN = _API_V3_BASE + "/token"
+_URL_VALIDATE_AUTH = _API_V3_BASE + "/validate-authcode"
+
+
+def _step1_verify_client(client_id):
+    """Step 1: Send login OTP request to get request_key."""
+    payload = {"fy_id": client_id, "app_id": "2"}
+    resp = requests.post(url=_URL_SEND_LOGIN_OTP, json=payload)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Step 1 (verify client) failed: {resp.text}")
+    return json.loads(resp.text)["request_key"]
+
+
+def _step2_generate_totp(secret):
+    """Step 2: Generate TOTP from secret key."""
+    return pyotp.TOTP(secret).now()
+
+
+def _step3_verify_totp(request_key, totp):
+    """Step 3: Verify TOTP and get new request_key."""
+    payload = {"request_key": request_key, "otp": totp}
+    resp = requests.post(url=_URL_VERIFY_OTP, json=payload)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Step 3 (verify TOTP) failed: {resp.text}")
+    return json.loads(resp.text)["request_key"]
+
+
+def _step4_verify_pin(request_key, pin):
+    """Step 4: Verify PIN and get access token for token exchange."""
+    payload = {
+        "request_key": request_key,
+        "identity_type": "pin",
+        "identifier": pin,
+    }
+    resp = requests.post(url=_URL_VERIFY_PIN, json=payload)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Step 4 (verify PIN) failed: {resp.text}")
+    return json.loads(resp.text)["data"]["access_token"]
+
+
+def _step5_get_auth_code(client_id, app_id, redirect_uri, app_type, access_token):
+    """Step 5: Exchange trade access token for auth_code."""
+    from urllib import parse as urlparse
+    payload = {
+        "fyers_id": client_id,
+        "app_id": app_id,
+        "redirect_uri": redirect_uri,
+        "appType": app_type,
+        "code_challenge": "",
+        "state": "sample_state",
+        "scope": "",
+        "nonce": "",
+        "response_type": "code",
+        "create_cookie": True,
+    }
+    headers = {"Authorization": f"Bearer {access_token}"}
+    resp = requests.post(url=_URL_TOKEN, json=payload, headers=headers)
+    if resp.status_code != 308:
+        raise RuntimeError(f"Step 5 (get auth code) failed: {resp.text}")
+    result = json.loads(resp.text)
+    url = result["Url"]
+    auth_code = urlparse.parse_qs(urlparse.urlparse(url).query)["auth_code"][0]
+    return auth_code
+
+
+def _step6_validate_auth_code(auth_code, app_id, app_type, app_secret):
+    """Step 6: Validate auth code to get final API access token."""
+    message = f"{app_id}-{app_type}:{app_secret}"
+    app_id_hash = hashlib.sha256(message.encode()).hexdigest()
+    payload = {
+        "grant_type": "authorization_code",
+        "appIdHash": app_id_hash,
+        "code": auth_code,
+    }
+    resp = requests.post(url=_URL_VALIDATE_AUTH, json=payload)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Step 6 (validate auth) failed: {resp.text}")
+    return json.loads(resp.text)["access_token"]
+
+
+def generate_fyers_token():
+    """
+    Full automated token generation using TOTP.
+    Returns the complete access token string (e.g. "A0B798UIQA-100:ey...").
+    """
+    client_id = _cred("FYERS_CLIENT_ID")
+    pin = _cred("FYERS_PIN")
+    app_id = _cred("FYERS_APP_ID")
+    app_type = _cred("FYERS_APP_TYPE")
+    app_secret = _cred("FYERS_APP_SECRET")
+    totp_secret = _cred("FYERS_TOTP_SECRET")
+    redirect_uri = _cred("FYERS_REDIRECT_URI")
+
+    # Step 1: Verify client ID
+    request_key = _step1_verify_client(client_id)
+
+    # Step 2: Generate TOTP
+    totp = _step2_generate_totp(totp_secret)
+
+    # Step 3: Verify TOTP
+    request_key_2 = _step3_verify_totp(request_key, totp)
+
+    # Step 4: Verify PIN
+    trade_access_token = _step4_verify_pin(request_key_2, pin)
+
+    # Step 5: Get auth code
+    auth_code = _step5_get_auth_code(
+        client_id, app_id, redirect_uri, app_type, trade_access_token
     )
-    return session.generate_authcode()
 
+    # Step 6: Validate auth code → final access token
+    api_token = _step6_validate_auth_code(auth_code, app_id, app_type, app_secret)
 
-def exchange_auth_code(auth_code):
-    """Exchange auth_code for access_token via Fyers SDK."""
-    client_id = str(st.secrets["FYERS_CLIENT_ID"])
-    secret_key = str(st.secrets["FYERS_SECRET_KEY"])
-    redirect_uri = str(st.secrets.get("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html"))
-
-    session = fyersModel.SessionModel(
-        client_id=client_id,
-        secret_key=secret_key,
-        redirect_uri=redirect_uri,
-        response_type="code",
-        grant_type="authorization_code",
-    )
-    session.set_token(auth_code)
-    response = session.generate_token()
-
-    if isinstance(response, dict) and "access_token" in response:
-        return response["access_token"]
-
-    raise RuntimeError(f"Token exchange failed: {response}")
-
-
-def extract_auth_code_from_url(url):
-    """Extract auth_code from the redirect URL after Fyers login."""
-    from urllib.parse import urlparse, parse_qs
-    parsed = urlparse(url.strip())
-    params = parse_qs(parsed.query)
-    if "auth_code" in params:
-        return params["auth_code"][0]
-    # Try fragment (hash) in case it's in the fragment
-    params_frag = parse_qs(parsed.fragment)
-    if "auth_code" in params_frag:
-        return params_frag["auth_code"][0]
-    # Maybe the user pasted just the auth_code
-    if url.strip() and not url.strip().startswith("http"):
-        return url.strip()
-    raise ValueError(
-        "Could not find auth_code in the URL. "
-        "Please paste the full URL from your browser after logging in."
-    )
+    # Build complete token: "APP_ID-APP_TYPE:access_token"
+    full_token = f"{app_id}-{app_type}:{api_token}"
+    return full_token
 
 
 def is_fyers_connected():
@@ -142,46 +243,60 @@ def is_fyers_connected():
     return "_fyers_token" in st.session_state and st.session_state["_fyers_token"]
 
 
+def auto_connect_fyers():
+    """
+    Automatically generate and store Fyers token using TOTP.
+    Called once per session. Returns True on success, False on failure.
+    """
+    if is_fyers_connected():
+        return True
+
+    try:
+        token = generate_fyers_token()
+        st.session_state["_fyers_token"] = token
+        st.session_state.pop("_fc", None)  # Clear cached client
+        return True
+    except Exception as e:
+        st.session_state["_fyers_token_error"] = str(e)
+        return False
+
+
 def render_fyers_login():
     """
-    Render the Fyers login UI in the sidebar.
+    Render the Fyers connection UI in the sidebar.
+    Now uses auto-TOTP — no manual browser login needed.
     Returns True if connected, False if login is needed.
     """
     if is_fyers_connected():
         return True
 
-    auth_url = get_auth_url()
-
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🔐 Fyers API Login")
-    st.sidebar.markdown(
-        "Token required. Click below to login, then paste the redirect URL."
-    )
-    st.sidebar.markdown(
-        f'<a href="{auth_url}" target="_blank" style="'
-        f'display:inline-block;padding:8px 16px;background:#2962ff;'
-        f'color:white;border-radius:6px;text-decoration:none;'
-        f'font-weight:600;margin:8px 0;width:100%;text-align:center;'
-        f'">🔑 Login to Fyers</a>',
-        unsafe_allow_html=True,
-    )
+    st.sidebar.markdown("### 🔐 Fyers API Connection")
 
-    redirect_url = st.sidebar.text_input(
-        "Paste redirect URL here:",
-        key="_fyers_redirect_url_input",
-        placeholder="https://trade.fyers.in/...?auth_code=...",
-    )
+    # Try auto-connect
+    with st.sidebar:
+        with st.spinner("🔄 Generating token via TOTP..."):
+            success = auto_connect_fyers()
 
-    if redirect_url:
-        try:
-            auth_code = extract_auth_code_from_url(redirect_url)
-            token = exchange_auth_code(auth_code)
-            st.session_state["_fyers_token"] = token
-            st.session_state.pop("_fc", None)  # Clear cached client
-            st.sidebar.success("✅ Connected to Fyers!")
+    if success:
+        st.sidebar.success("✅ Auto-connected to Fyers!")
+        st.rerun()
+        return True
+    else:
+        error = st.session_state.get("_fyers_token_error", "Unknown error")
+        st.sidebar.error(f"❌ Auto-connect failed: {error}")
+        st.sidebar.markdown(
+            "**Troubleshooting:**\n"
+            "- Ensure TOTP is enabled at [MyAccount](https://myaccount.fyers.in/ManageAccount)\n"
+            "- Check your credentials in `.streamlit/secrets.toml`\n"
+            "- Click **🔄 Reconnect** in sidebar to retry"
+        )
+
+        # Manual retry button
+        if st.sidebar.button("🔄 Retry Auto-Connect", key="_fyers_retry_btn"):
+            st.session_state.pop("_fyers_token_error", None)
+            st.session_state.pop("_fyers_token", None)
             st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"❌ Login failed: {e}")
 
     st.sidebar.markdown("---")
     return False
@@ -190,7 +305,7 @@ def render_fyers_login():
 def get_fyers_client():
     """
     Get or create Fyers API client.
-    Token must be set in session_state via render_fyers_login().
+    Token is auto-generated via TOTP on first call.
     """
     _SS = st.session_state
 
@@ -199,11 +314,15 @@ def get_fyers_client():
 
     token = _SS.get("_fyers_token")
     if not token:
-        raise RuntimeError(
-            "Fyers API not connected. Please login via the sidebar."
-        )
+        # Try auto-connect before failing
+        if auto_connect_fyers():
+            token = _SS.get("_fyers_token")
+        if not token:
+            raise RuntimeError(
+                "Fyers API not connected. Auto-TOTP token generation failed."
+            )
 
-    client_id = str(st.secrets["FYERS_CLIENT_ID"])
+    client_id = f"{_cred('FYERS_APP_ID')}-{_cred('FYERS_APP_TYPE')}"
     fyers = fyersModel.FyersModel(
         client_id=client_id, is_async=False, token=token, log_path=""
     )
@@ -212,10 +331,11 @@ def get_fyers_client():
 
 
 def refresh_token():
-    """Force re-login (clears cached token and client)."""
+    """Force token regeneration (clears cached token and client)."""
     _SS = st.session_state
     _SS.pop("_fc", None)
     _SS.pop("_fyers_token", None)
+    _SS.pop("_fyers_token_error", None)
 
 
 # ── Symbol Building ──────────────────────────────────────────────────────────
