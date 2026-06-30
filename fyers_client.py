@@ -280,10 +280,24 @@ def get_expiries(index):
                 seen.add(lbl)
                 expiries.append(lbl)
         if not expiries:
+            # Dump response structure for debugging
+            data = resp.get("data", {})
+            data_keys = list(data.keys()) if isinstance(data, dict) else f"type={type(data).__name__}"
+            chain_len = len(data.get("optionsChain", [])) if isinstance(data, dict) else "N/A"
+            # Show first item keys if chain exists
+            sample = ""
+            if isinstance(data, dict):
+                chain = data.get("optionsChain", [])
+                if chain and len(chain) > 0:
+                    sample = f", first_item_keys={list(chain[0].keys())}"
+                # Check for alternative key names
+                for alt_key in ["expiryData", "expiry", "options", "optionChain", "oc"]:
+                    if alt_key in data:
+                        sample += f", found_alt_key='{alt_key}' (len={len(data[alt_key])})"
             st.warning(
-                f"⚠️ Option chain for {index} returned 0 expiries. "
-                f"API response code: {resp.get('code')}, "
-                f"message: {resp.get('message', 'N/A')}"
+                f"⚠️ {index}: 0 expiries. code={resp.get('code')}, "
+                f"top_keys={list(resp.keys())}, data_keys={data_keys}, "
+                f"optionsChain_len={chain_len}{sample}"
             )
         _SS[key] = expiries
         return expiries
