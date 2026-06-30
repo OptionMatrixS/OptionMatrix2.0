@@ -272,33 +272,38 @@ def get_expiries(index):
 
     try:
         resp = get_option_chain(index)
-        seen = set()
+        data = resp.get("data", {})
+
+        # Expiries are in data["expiryData"] (list of dicts or strings)
+        raw_expiries = data.get("expiryData", [])
         expiries = []
-        for opt in resp.get("data", {}).get("optionsChain", []):
-            lbl = opt.get("expiryDate", "")
-            if lbl and lbl not in seen:
-                seen.add(lbl)
-                expiries.append(lbl)
+        for item in raw_expiries:
+            if isinstance(item, dict):
+                # Try common key names for the expiry label
+                lbl = item.get("date", item.get("expiry", item.get("expiryDate", "")))
+                if lbl:
+                    expiries.append(str(lbl))
+            elif isinstance(item, str):
+                expiries.append(item)
+            elif isinstance(item, (int, float)):
+                # Could be epoch timestamp
+                expiries.append(str(item))
+
+        # Fallback: try extracting from optionsChain if expiryData was empty
         if not expiries:
-            # Dump response structure for debugging
-            data = resp.get("data", {})
-            data_keys = list(data.keys()) if isinstance(data, dict) else f"type={type(data).__name__}"
-            chain_len = len(data.get("optionsChain", [])) if isinstance(data, dict) else "N/A"
-            # Show first item keys if chain exists
-            sample = ""
-            if isinstance(data, dict):
-                chain = data.get("optionsChain", [])
-                if chain and len(chain) > 0:
-                    sample = f", first_item_keys={list(chain[0].keys())}"
-                # Check for alternative key names
-                for alt_key in ["expiryData", "expiry", "options", "optionChain", "oc"]:
-                    if alt_key in data:
-                        sample += f", found_alt_key='{alt_key}' (len={len(data[alt_key])})"
+            seen = set()
+            for opt in data.get("optionsChain", []):
+                lbl = opt.get("expiryDate", "")
+                if lbl and lbl not in seen:
+                    seen.add(lbl)
+                    expiries.append(lbl)
+
+        if not expiries:
             st.warning(
-                f"⚠️ {index}: 0 expiries. code={resp.get('code')}, "
-                f"top_keys={list(resp.keys())}, data_keys={data_keys}, "
-                f"optionsChain_len={chain_len}{sample}"
+                f"⚠️ No expiries found for {index}. "
+                f"expiryData sample: {raw_expiries[:2] if raw_expiries else 'empty'}"
             )
+
         _SS[key] = expiries
         return expiries
     except Exception as e:
@@ -318,11 +323,11 @@ def get_strikes(index, expiry_label):
         resp = get_option_chain(index)
         strikes = set()
         for opt in resp.get("data", {}).get("optionsChain", []):
-            exp = opt.get("expiryDate", "")
-            if exp == expiry_label:
-                sp = opt.get("strikePrice", 0)
-                if sp:
-                    strikes.add(int(float(str(sp).replace(",", ""))))
+            # Try both old and new key names for strike price
+            sp = opt.get("strike_price", opt.get("strikePrice", 0))
+            if sp:
+                strikes.add(int(float(str(sp).replace(",", ""))))
+        # Return all strikes (API already filters by the requested symbol)
         result = sorted(strikes)
         _SS[key] = result
         return result
