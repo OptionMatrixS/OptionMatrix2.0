@@ -279,6 +279,12 @@ def get_expiries(index):
             if lbl and lbl not in seen:
                 seen.add(lbl)
                 expiries.append(lbl)
+        if not expiries:
+            st.warning(
+                f"⚠️ Option chain for {index} returned 0 expiries. "
+                f"API response code: {resp.get('code')}, "
+                f"message: {resp.get('message', 'N/A')}"
+            )
         _SS[key] = expiries
         return expiries
     except Exception as e:
