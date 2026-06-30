@@ -16,7 +16,7 @@ st.set_page_config(
 
 from styles import inject_css
 from auth import show_login_page, has_access, init_db, TOOL_LABELS
-from fyers_client import get_ist_now, market_status_html, refresh_token, is_market_open, render_fyers_login, is_fyers_connected
+from fyers_client import get_ist_now, market_status_html, refresh_token, is_market_open, render_fyers_login, is_fyers_connected, auto_connect_fyers
 
 # ── Tab imports ──────────────────────────────────────────────────────────────
 from spread_chart import render_spread_chart
@@ -339,6 +339,11 @@ def main():
     if not _SS.get("_state_loaded"):
         load_user_state()
         _SS["_state_loaded"] = True
+
+    # Auto-connect to Fyers API (generates token via TOTP)
+    if not is_fyers_connected():
+        with st.spinner("🔄 Connecting to Fyers API..."):
+            auto_connect_fyers()
 
     # Render sidebar
     render_sidebar()
